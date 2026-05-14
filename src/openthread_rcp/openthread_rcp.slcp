@@ -34,6 +34,8 @@ source:
 define:
   - name: OPENTHREAD_CONFIG_DEFAULT_TRANSMIT_POWER
     value: 6
+  - name: OPENTHREAD_CONFIG_WAKEUP_COORDINATOR_ENABLE
+    value: 1
 
 configuration:
   - name: SL_MAIN_START_TASK_STACK_SIZE_BYTES
