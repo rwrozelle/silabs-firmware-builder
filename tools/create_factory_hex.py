@@ -4,7 +4,15 @@ import enum
 import json
 import pathlib
 
-from universal_silabs_flasher.firmware import GBLImage, GBLTagId
+from pygbl import (
+    GBL3Bootloader,
+    GBL3EraseProg,
+    GBL3Header,
+    GBL3Image,
+    GBL3Prog,
+    GBL3Type,
+    read_encryption_key,
+)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -239,6 +247,19 @@ class IntelHex:
         )
 
 
+def load_gbl(path: pathlib.Path, key: bytes | None) -> GBL3Image:
+    """Read a GBL, decrypting and decompressing it into plain program data."""
+    image = GBL3Image.from_bytes(path.read_bytes())
+
+    if GBL3Type.ENCRYPTION_AESCCM in image.get_first_tag(GBL3Header).type:
+        if key is None:
+            raise ValueError(f"{path} is encrypted, pass --encryption-key")
+
+        image = image.decrypt(key)
+
+    return image.decompress()
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Create an Intel HEX file combining a bootloader, application, and manufacturing tokens."
@@ -262,6 +283,13 @@ def main() -> None:
         help="Path to tokens JSON.",
     )
     parser.add_argument(
+        "--encryption-key",
+        type=pathlib.Path,
+        required=False,
+        default=None,
+        help="Path to the image encryption key token file, for encrypted GBL files.",
+    )
+    parser.add_argument(
         "--output",
         type=pathlib.Path,
         required=True,
@@ -271,22 +299,29 @@ def main() -> None:
 
     output_hex = IntelHex()
 
+    if args.encryption_key is not None:
+        key = read_encryption_key(args.encryption_key.read_text())
+    else:
+        key = None
+
     # Flash the bootloader
-    bootloader_gbl = GBLImage.from_bytes(args.bootloader.read_bytes())
-    bootloader_data = bootloader_gbl.get_first_tag(GBLTagId.BOOTLOADER)
-    bootloader_hdr, bootloader = bootloader_data[:8], bootloader_data[8:]
-    _bootloader_version = int.from_bytes(bootloader_hdr[0:4], "little")
-    bootloader_base_addr = int.from_bytes(bootloader_hdr[4:8], "little")
+    bootloader_gbl = load_gbl(args.bootloader, key)
+    bootloader = bootloader_gbl.get_first_tag(GBL3Bootloader)
 
-    output_hex.flash_data(address=bootloader_base_addr, data=bootloader)
+    output_hex.flash_data(address=bootloader.address, data=bootloader.data)
 
-    # Flash the application
-    application_gbl = GBLImage.from_bytes(args.application.read_bytes())
-    application_data = application_gbl.get_first_tag(GBLTagId.PROGRAM_DATA2)
-    application_hdr, application = application_data[:4], application_data[4:]
-    application_base_addr = int.from_bytes(application_hdr[0:4], "little")
+    # Flash the application segments. Both program data tag ids mean the same thing,
+    # only their erase behavior on the device differs
+    application_gbl = load_gbl(args.application, key)
+    application_tags = [
+        t for t in application_gbl.tags if isinstance(t, (GBL3EraseProg, GBL3Prog))
+    ]
 
-    output_hex.flash_data(address=application_base_addr, data=application)
+    if not application_tags:
+        raise ValueError(f"{args.application} contains no program data")
+
+    for application in application_tags:
+        output_hex.flash_data(address=application.address, data=application.data)
 
     # Flash USERDATA tokens
     tokens_json = json.loads(args.tokens.read_text())
