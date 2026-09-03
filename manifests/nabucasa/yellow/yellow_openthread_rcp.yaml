@@ -2,19 +2,32 @@ name: Yellow OpenThread RCP
 device: MGM210PA32JIA
 base_project: src/openthread_rcp
 filename: "{manifest_name}_{ot_rcp_version.split('/')[-1]}_gsdk_{sdk_version}"
-sdk: "simplicity_sdk:2025.6.2"
-toolchain: "12.2.1.20221205"
+sdk: "simplicity_sdk:2026.6.1"
+toolchain: "14.2.1.20241119"
 
 gbl:
   fw_type: openthread_rcp
   ot_rcp_version: dynamic
   baudrate: 460800
 
+sdk_patches:
+  - disable_gp_rx_filter.patch
+  - uart_tx_drop_on_timeout.patch
+  - uart_tx_bounded_wait_usart.patch
+
+sdk_extension:
+  - id: watchdog
+    version: 1.0.0
+    vendor: nabucasa
+
 add_components:
 - id: iostream_usart
   instance: [vcom]
 - id: simple_led
   instance: [board_activity]
+- id: watchdog
+  vendor: nabucasa
+  package: watchdog
 
 # SLC validates clock settings before c_defines are patched, use `configuration`
 configuration:
@@ -23,6 +36,10 @@ configuration:
 c_defines:
   # SDK bug: the PCLK divider is set to 1 for the MGM210, it is set to 2 everywhere else
   SL_CLOCK_MANAGER_PCLK_DIVIDER: SL_CLOCK_MANAGER_PCLK_DIV_MIN
+
+  OPENTHREAD_CONFIG_NCP_TX_BUFFER_SIZE:
+    type: c_flag
+    value: 4096  # Default is 2048
 
   SL_IOSTREAM_USART_VCOM_PERIPHERAL: USART0
   SL_IOSTREAM_USART_VCOM_PERIPHERAL_NO: 0

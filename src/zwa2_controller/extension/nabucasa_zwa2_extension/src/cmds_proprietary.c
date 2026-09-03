@@ -10,6 +10,7 @@
 #include <cmds_proprietary.h>
 #include <string.h>
 #include <ZAF_nvm_app.h>
+#include "btl_interface.h"
 #include "cmd_handlers.h"
 #include "SerialAPI.h"
 #include "led_manager_zwa2.h"
@@ -87,9 +88,10 @@ ZW_ADD_CMD(FUNC_ID_NABU_CASA)
     BITMASK_ADD_CMD(supportedBitmask, NABU_CASA_SYSTEM_INDICATION_SET);
     BITMASK_ADD_CMD(supportedBitmask, NABU_CASA_CONFIG_GET);
     BITMASK_ADD_CMD(supportedBitmask, NABU_CASA_CONFIG_SET);
+    BITMASK_ADD_CMD(supportedBitmask, NABU_CASA_BOOTLOADER_INFO);
 
     // Copy as few bytes as necessary into the output buffer
-    for (int j = 0; j <= NABU_CASA_LED_SET_BINARY / 8; j++)
+    for (int j = 0; j <= NABU_CASA_BOOTLOADER_INFO / 8; j++)
     {
       response[i++] = supportedBitmask[j];
     }
@@ -285,6 +287,29 @@ ZW_ADD_CMD(FUNC_ID_NABU_CASA)
 
     response[i++] = cmdRes;
     break;
+
+  case NABU_CASA_BOOTLOADER_INFO:
+  {
+    // HOST->ZW (REQ): NABU_CASA_BOOTLOADER_INFO
+    // ZW->HOST (RES): NABU_CASA_BOOTLOADER_INFO | major | minor | customer | capabilities[4]
+
+    // bootloader_getInfo() leaves the version untouched when it finds no
+    // bootloader table, so the initializer defines what gets reported.
+    BootloaderInformation_t btlInfo = { 0 };
+    bootloader_getInfo(&btlInfo);
+
+    // The SDK's customer field is 16 bits wide, but only its low byte is sent
+    // because the version is consumed as major.minor.customer.
+    response[i++] = (uint8_t)(btlInfo.version >> BOOTLOADER_VERSION_MAJOR_SHIFT);
+    response[i++] = (uint8_t)(btlInfo.version >> BOOTLOADER_VERSION_MINOR_SHIFT);
+    response[i++] = (uint8_t)btlInfo.version;
+
+    response[i++] = (uint8_t)(btlInfo.capabilities >> 24);
+    response[i++] = (uint8_t)(btlInfo.capabilities >> 16);
+    response[i++] = (uint8_t)(btlInfo.capabilities >> 8);
+    response[i++] = (uint8_t)btlInfo.capabilities;
+    break;
+  }
 
   default:
     // Unsupported. Return false

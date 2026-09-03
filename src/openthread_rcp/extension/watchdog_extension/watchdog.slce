@@ -1,4 +1,4 @@
-id: bootloader_gpio_activation_dual
+id: watchdog
 vendor: nabucasa
 version: "1.0.0"
 component_path:

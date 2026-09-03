@@ -3,23 +3,23 @@
 
 from __future__ import annotations
 
-import re
-import sys
+import argparse
+import hashlib
 import json
 import logging
-import hashlib
 import pathlib
-import argparse
+import re
+import sys
+from datetime import UTC, datetime
 
-from datetime import datetime, timezone
-
-from universal_silabs_flasher.firmware import parse_firmware_image
+from pygbl import GBLError, parse_firmware_image
 
 _LOGGER = logging.getLogger(__name__)
 
 
-def parse_markdown_changelog(text: str) -> dict[str, tuple[str, str]]:
-    changelogs = {}
+def parse_markdown_changelog(text: str) -> list[dict[str, str | None]]:
+    """Parse a changelog into an ordered list of entries, newest first."""
+    entries = []
     chunks = re.split(r"^# (.*?)\n", text, flags=re.MULTILINE)[1:]
 
     for version, raw_text in zip(chunks[::2], chunks[1::2]):
@@ -30,9 +30,31 @@ def parse_markdown_changelog(text: str) -> dict[str, tuple[str, str]]:
                 "First line of every changelog must be less than 255 characters"
             )
 
-        changelogs[version] = (first_line, rest.strip() or None)
+        entries.append(
+            {
+                "version": version,
+                "summary": first_line,
+                "notes": rest.strip() or None,
+            }
+        )
 
-    return changelogs
+    return entries
+
+
+def get_firmware_version(metadata: dict) -> str | None:
+    """Extract the firmware version from its metadata, if it is versioned at all."""
+    version_keys = {k for k in metadata if k.endswith("_version")} - {
+        "sdk_version",
+        "metadata_version",
+    }
+
+    # Some firmwares, such as the Zigbee router, carry no version of their own
+    if not version_keys:
+        return None
+
+    (version_key,) = version_keys
+
+    return metadata[version_key]
 
 
 def main():
@@ -53,30 +75,29 @@ def main():
     args = parser.parse_args()
     manifest = {
         "metadata": {
-            "created_at": datetime.now(timezone.utc).isoformat(),
+            "created_at": datetime.now(UTC).isoformat(),
         },
+        "changelogs": {},
         "firmwares": [],
     }
 
-    for firmware_file in args.firmware_dir.glob("*.gbl"):
+    for firmware_file in sorted(args.firmware_dir.glob("*.gbl")):
         data = firmware_file.read_bytes()
 
         try:
             firmware = parse_firmware_image(data)
-        except ValueError:
+        except GBLError:
             _LOGGER.warning("Ignoring invalid firmware file: %s", firmware_file)
             continue
 
-        try:
-            gbl_metadata = firmware.get_nabucasa_metadata()
-        except (KeyError, ValueError):
-            metadata = None
-        else:
-            metadata = gbl_metadata.original_json
+        # Encrypted images keep their metadata inside the ciphertext, so it is absent
+        raw_metadata = firmware.get_metadata()
+        metadata = json.loads(raw_metadata) if raw_metadata is not None else None
 
         manifest["firmwares"].append(
             {
                 "filename": firmware_file.name,
+                "version": get_firmware_version(metadata) if metadata else None,
                 "checksum": f"sha3-256:{hashlib.sha3_256(data).hexdigest()}",
                 "size": len(data),
                 "metadata": metadata,
@@ -86,6 +107,7 @@ def main():
         )
 
     missing_changelogs = False
+    changelogs: dict[str, list[dict[str, str | None]]] = {}
 
     for fw in manifest["firmwares"]:
         if fw["metadata"] is None:
@@ -94,33 +116,36 @@ def main():
         fw_type = fw["metadata"]["fw_type"]
         changelog_md = args.source_dir / fw_type / "CHANGELOG.md"
 
-        if not changelog_md.exists():
+        if fw_type not in changelogs:
+            if changelog_md.exists():
+                changelogs[fw_type] = parse_markdown_changelog(changelog_md.read_text())
+            else:
+                changelogs[fw_type] = []
+
+        if not changelogs[fw_type]:
             continue
 
-        changelogs = parse_markdown_changelog(changelog_md.read_text())
+        entry = next(
+            (e for e in changelogs[fw_type] if e["version"] == fw["version"]), None
+        )
 
-        version_keys = {k for k in fw["metadata"] if k.endswith("_version")} - {
-            "sdk_version",
-            "metadata_version",
-        }
-        assert len(version_keys) == 1
-        version_key = list(version_keys)[0]
-
-        version = fw["metadata"][version_key]
-
-        if version not in changelogs:
+        if entry is None:
             _LOGGER.error(
                 "Firmware %s version %s has no changelog entry in %s",
                 fw["filename"],
-                version,
+                fw["version"],
                 changelog_md,
             )
             missing_changelogs = True
             continue
 
-        release_notes, release_summary = changelogs[version]
-        fw["release_notes"] = release_notes
-        fw["release_summary"] = release_summary
+        # These two fields are kept for backwards compatibility with older clients that
+        # predate `changelogs`. Their names are inverted: `release_notes` holds the
+        # one-line summary and `release_summary` holds the detailed body.
+        fw["release_notes"] = entry["summary"]
+        fw["release_summary"] = entry["notes"]
+
+    manifest["changelogs"] = {t: e for t, e in changelogs.items() if e}
 
     if missing_changelogs:
         sys.exit(1)
